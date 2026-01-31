@@ -1,22 +1,35 @@
+# enricher/crawler.py
 from __future__ import annotations
 
 import re
+from typing import Tuple
+
 import requests
 
-from .constants import HEADERS, KEYWORD_HINTS
+from .constants import HEADERS, KEYWORD_HINTS, LOW_VALUE_PAGE_HINTS
 from .extractors import extract_emails_filtered
 from .urls import get_domain, normalize_url
 
 
-def fetch_html(url: str, timeout: int = 10) -> tuple[int, str]:
+def fetch_html(url: str, timeout: int = 10) -> Tuple[int, str]:
+    """
+    Fetch HTML content from a public URL.
+    Returns (status_code, html_text). If error, returns (0, "").
+    """
     try:
         r = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
-        return r.status_code, r.text if r.ok else ""
+        if not r.ok:
+            return r.status_code, ""
+        return r.status_code, r.text or ""
     except requests.RequestException:
         return 0, ""
 
 
 def extract_internal_links(base_url: str, html: str, max_links: int = 5) -> list[str]:
+    """
+    Extract internal links from an HTML page that likely lead to contact/privacy/legal pages.
+    Only keeps links on the same domain as base_url.
+    """
     if not html:
         return []
 
@@ -24,9 +37,10 @@ def extract_internal_links(base_url: str, html: str, max_links: int = 5) -> list
     if not base_domain:
         return []
 
+    # naive href extraction (good enough for controlled crawl)
     hrefs = re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.IGNORECASE)
 
-    candidates = []
+    candidates: list[str] = []
     for h in hrefs:
         h = (h or "").strip()
         if not h:
@@ -36,6 +50,7 @@ def extract_internal_links(base_url: str, html: str, max_links: int = 5) -> list
         if not any(k in low for k in KEYWORD_HINTS):
             continue
 
+        # normalize relative/partial links into absolute
         if h.startswith("//"):
             h = "https:" + h
         elif h.startswith("/"):
@@ -43,6 +58,7 @@ def extract_internal_links(base_url: str, html: str, max_links: int = 5) -> list
         elif not h.startswith(("http://", "https://")):
             h = base_url.rstrip("/") + "/" + h.lstrip("/")
 
+        # keep only internal
         if get_domain(h) != base_domain:
             continue
 
@@ -50,7 +66,7 @@ def extract_internal_links(base_url: str, html: str, max_links: int = 5) -> list
         if nu:
             candidates.append(nu)
 
-    # dedup preserve order
+    # dedup preserve order + limit
     seen = set()
     out = []
     for u in candidates:
@@ -63,12 +79,31 @@ def extract_internal_links(base_url: str, html: str, max_links: int = 5) -> list
     return out
 
 
-def crawl_for_email(start_url: str, timeout: int = 10, max_pages: int = 3) -> tuple[str, str, str, str]:
+def _page_looks_low_value(url: str, html: str) -> bool:
     """
+    Detect pages likely containing example emails (documentation/tutorial) rather than contact info.
+    We only use this as a gentle filter to avoid selecting misleading emails.
+    """
+    u = (url or "").lower()
+    h = (html or "").lower()
+    return any(hint in u or hint in h for hint in LOW_VALUE_PAGE_HINTS)
+
+
+def crawl_for_email(start_url: str, timeout: int = 10, max_pages: int = 3) -> Tuple[str, str, str, str]:
+    """
+    Controlled crawl: visit at most `max_pages` pages on a domain:
+      - start_url
+      - then a few internal contact/privacy/about/legal links from the first page
+
     Returns: (email, source_url, status, confidence)
-    status: found / not_found / blocked
+      status: found / not_found / blocked / error
+      confidence: "0.6" when found via crawl
     """
-    to_visit = [normalize_url(start_url)]
+    first = normalize_url(start_url)
+    if not first:
+        return "", "", "error", ""
+
+    to_visit = [first]
     visited = set()
     pages_checked = 0
 
@@ -87,15 +122,16 @@ def crawl_for_email(start_url: str, timeout: int = 10, max_pages: int = 3) -> tu
         if not html:
             continue
 
-        emails = extract_emails_filtered(html)
-        if emails:
-            print(f"[DEBUG] emails found on {url}: {emails[:10]}")
-            return emails[0], url, "found", "0.6"
+        # Avoid selecting misleading "example email" pages (gentle filter)
+        if not _page_looks_low_value(url, html):
+            emails = extract_emails_filtered(html)
+            if emails:
+                return emails[0], url, "found", "0.6"
 
+        # only from first page: enqueue internal “contact-ish” pages
         if pages_checked == 1:
-            extra = extract_internal_links(url, html, max_links=5)
-            for e in extra:
-                if e not in visited:
-                    to_visit.append(e)
+            for link in extract_internal_links(url, html, max_links=5):
+                if link not in visited:
+                    to_visit.append(link)
 
     return "", "", "not_found", ""

@@ -1,7 +1,15 @@
+# enricher/extractors.py
 from __future__ import annotations
 
 from typing import List, Tuple
-from .constants import EMAIL_REGEX, STRIP_CHARS, PLACEHOLDER_DOMAINS, PLACEHOLDER_DOMAIN_SUBSTRINGS, PLACEHOLDER_TLDS
+
+from .constants import (
+    EMAIL_REGEX,
+    STRIP_CHARS,
+    PLACEHOLDER_DOMAINS,
+    PLACEHOLDER_DOMAIN_SUBSTRINGS,
+    PLACEHOLDER_TLDS,
+)
 
 
 def is_placeholder_email(email: str) -> bool:
@@ -14,7 +22,13 @@ def is_placeholder_email(email: str) -> bool:
     if not email or "@" not in email:
         return True
 
-    local, domain = email.lower().split("@", 1)
+    try:
+        local, domain = email.lower().split("@", 1)
+    except ValueError:
+        return True
+
+    if not local or not domain:
+        return True
 
     if domain in PLACEHOLDER_DOMAINS:
         return True
@@ -22,7 +36,6 @@ def is_placeholder_email(email: str) -> bool:
     if any(sub in domain for sub in PLACEHOLDER_DOMAIN_SUBSTRINGS):
         return True
 
-    # tld check
     if "." in domain:
         tld = domain.rsplit(".", 1)[-1]
         if tld in PLACEHOLDER_TLDS:
@@ -40,13 +53,14 @@ def extract_emails(text: str) -> List[str]:
     cleaned: List[str] = []
 
     for e in raw:
-        e2 = e.strip(STRIP_CHARS).lower()
+        e2 = (e or "").strip(STRIP_CHARS).lower()
+        # basic sanity checks
         if "@" in e2 and "." in e2.split("@")[-1] and " " not in e2:
             cleaned.append(e2)
 
     # deduplicate while preserving order
     seen = set()
-    uniq = []
+    uniq: List[str] = []
     for e in cleaned:
         if e not in seen:
             seen.add(e)
